@@ -1,0 +1,149 @@
+name: Build Rexa Drive
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            args: ""
+            rust_targets: ""
+          - name: macOS Apple Silicon
+            os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust_targets: "aarch64-apple-darwin"
+          - name: macOS Intel
+            os: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust_targets: "x86_64-apple-darwin"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: "Rexa Drive ${{ github.ref_name }}"
+          releaseBody: "Download the installer for your system below."
+          releaseDraft: true
+          args: ${{ matrix.args }}
+
+      - name: Keep bundles as workflow artifacts (for manual runs)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rexa-drive-${{ matrix.os }}-${{ matrix.rust_targets || 'default' }}
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/*/release/bundle/**
+          if-no-files-found: warn
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm install
+
+      - name: Generate platform icons (incl. Android) from app-icon.png
+        run: npm run icons
+
+      - name: Init Android project
+        run: npx tauri android init
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+
+      - name: Build release APK
+        run: npx tauri android build --apk --target aarch64 --target armv7
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          UNSIGNED="$(find src-tauri/gen/android -name '*unsigned*.apk' | head -n 1)"
+          echo "Unsigned APK: $UNSIGNED"
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > rexa.keystore
+            ALIAS="$KS_ALIAS"; PASS="$KS_PASS"
+          else
+            echo "::warning::No keystore secrets found – signing with a throw-away key. Updates over a previously installed build will NOT work."
+            ALIAS=rexa; PASS=rexa-temp-pass
+            keytool -genkeypair -keystore rexa.keystore -alias "$ALIAS" -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Rexa Drive"
+          fi
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign --ks rexa.keystore --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
+            --out RexaDrive-android.apk aligned.apk
+          "$BT/apksigner" verify RexaDrive-android.apk
+          rm -f rexa.keystore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RexaDrive-android
+          path: RexaDrive-android.apk
+
+      - name: Attach APK to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: RexaDrive-android.apk
