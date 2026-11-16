@@ -1,0 +1,29 @@
+[package]
+name = "rexa-drive"
+version = "1.0.0"
+description = "Rexa Drive – ad-free Telegram cloud drive"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "rexa_drive_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "io-util", "sync", "rt-multi-thread", "macros"] }
+# Pure-Rust MTProto client (talks to Telegram directly with the user's own account)
+grammers-client = "0.7"
+grammers-session = "0.7"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
